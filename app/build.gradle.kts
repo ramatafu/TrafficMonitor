@@ -40,6 +40,7 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.activity:activity-ktx:1.9.1")
+    implementation("androidx.fragment:fragment-ktx:1.8.4")
 
     // Room — постоянное хранилище (список блокировок, обнаруженные домены),
     // переживает перезапуск сервиса и приложения

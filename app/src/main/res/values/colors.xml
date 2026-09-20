@@ -1,0 +1,8 @@
+<resources>
+    <color name="app_background">#0B0F14</color>
+    <color name="app_surface">#151B24</color>
+    <color name="app_accent">#FF3B30</color>
+    <color name="app_text_primary">#FFFFFF</color>
+    <color name="app_text_secondary">#8A93A1</color>
+    <color name="app_divider">#232A35</color>
+</resources>

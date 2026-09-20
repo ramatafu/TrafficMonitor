@@ -1,3 +1,8 @@
 <resources>
-    <style name="Theme.TrafficMonitor" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+    <style name="Theme.TrafficMonitor" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/app_accent</item>
+        <item name="colorAccent">@color/app_accent</item>
+        <item name="android:windowBackground">@color/app_background</item>
+        <item name="colorSurface">@color/app_surface</item>
+    </style>
 </resources>
