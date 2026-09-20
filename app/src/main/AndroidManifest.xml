@@ -25,6 +25,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.AppListActivity"
+            android:exported="false"
+            android:label="Приложения" />
+
         <service
             android:name=".vpn.LocalVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"

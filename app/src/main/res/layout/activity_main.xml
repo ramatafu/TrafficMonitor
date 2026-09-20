@@ -11,6 +11,13 @@
         android:layout_height="wrap_content"
         android:text="Запустить мониторинг" />
 
+    <Button
+        android:id="@+id/appListButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Приложения (блокировка)" />
+
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"

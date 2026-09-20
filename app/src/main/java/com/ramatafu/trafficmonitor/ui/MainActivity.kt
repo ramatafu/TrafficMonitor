@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
 
         statusText = findViewById(R.id.statusText)
         toggleButton = findViewById(R.id.startButton)
+        val appListButton = findViewById<Button>(R.id.appListButton)
 
         toggleButton.setOnClickListener {
             if (LocalVpnService.isRunning.value) {
@@ -42,6 +43,10 @@ class MainActivity : AppCompatActivity() {
             } else {
                 requestVpnPermissionAndStart()
             }
+        }
+
+        appListButton.setOnClickListener {
+            startActivity(Intent(this, AppListActivity::class.java))
         }
 
         observeVpnState()
@@ -88,7 +93,9 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = buildString {
                     append("Соединений: ${entries.size}\n\n")
                     entries.take(20).forEach { entry ->
-                        append("${entry.appLabel} → ${entry.destIp}:${entry.destPort} ")
+                        val destination = entry.domain ?: entry.destIp
+                        val marker = if (entry.blocked) "🚫 " else ""
+                        append("$marker${entry.appLabel} → $destination:${entry.destPort} ")
                         append("[${entry.protocol}] ${entry.bytes} байт (${entry.packetCount} пак.)\n")
                     }
                 }

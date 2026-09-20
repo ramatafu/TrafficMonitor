@@ -42,7 +42,14 @@ class TunPacketReader(
                         } else {
                             ByteArray(0)
                         }
-                        onPacket(parsed, transportSegment)
+                        try {
+                            onPacket(parsed, transportSegment)
+                        } catch (e: Exception) {
+                            // Ошибка в обработке ОДНОГО пакета не должна ронять весь сервис —
+                            // логируем и едем дальше. Именно тут раньше падало приложение
+                            // целиком из-за необработанного исключения в резолвере.
+                            Log.w(TAG, "Ошибка обработки пакета (${parsed.protocol}): ${e.message}")
+                        }
                     }
                 } catch (e: IOException) {
                     // возникает при остановке VPN (interface закрывается) — это нормальное завершение

@@ -24,7 +24,7 @@ data class UdpSessionKey(
     val remoteIp: String, val remotePort: Int
 )
 
-private class UdpSession(val socket: DatagramSocket, val key: UdpSessionKey) {
+private class UdpSession(val socket: DatagramSocket, val key: UdpSessionKey, val packageName: String) {
     var readerJob: Job? = null
     @Volatile var lastActivityMs: Long = System.currentTimeMillis()
 }
@@ -46,10 +46,11 @@ class UdpForwarder(
     fun forward(
         clientIp: String, clientPort: Int,
         remoteIp: String, remotePort: Int,
-        payload: ByteArray
+        payload: ByteArray,
+        packageName: String
     ) {
         val key = UdpSessionKey(clientIp, clientPort, remoteIp, remotePort)
-        val session = sessions.getOrPut(key) { createSession(key) } ?: return
+        val session = sessions.getOrPut(key) { createSession(key, packageName) } ?: return
 
         try {
             val remoteAddress = InetAddress.getByName(remoteIp)
@@ -62,7 +63,7 @@ class UdpForwarder(
         }
     }
 
-    private fun createSession(key: UdpSessionKey): UdpSession? {
+    private fun createSession(key: UdpSessionKey, packageName: String): UdpSession? {
         val network = UnderlyingNetworkProvider.find(context)
         if (network == null) {
             Log.w(TAG, "Не нашли не-VPN сеть для UDP $key — нет доступа в интернет")
@@ -80,7 +81,7 @@ class UdpForwarder(
             return null
         }
 
-        val session = UdpSession(socket, key)
+        val session = UdpSession(socket, key, packageName)
         session.readerJob = forwarderScope.launch {
             val buffer = ByteArray(32 * 1024)
             while (isActive) {
@@ -111,6 +112,16 @@ class UdpForwarder(
         sessions.remove(key)?.let {
             it.readerJob?.cancel()
             it.socket.close()
+        }
+    }
+
+    /** Закрывает ВСЕ активные сессии указанного пакета — вызывается сразу при включении блокировки. */
+    fun closeSessionsForPackage(packageName: String) {
+        val toClose = sessions.entries.filter { it.value.packageName == packageName }
+        toClose.forEach { (key, session) ->
+            sessions.remove(key)
+            session.readerJob?.cancel()
+            session.socket.close()
         }
     }
 

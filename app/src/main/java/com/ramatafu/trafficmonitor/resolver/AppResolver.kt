@@ -29,9 +29,15 @@ class AppResolver(private val context: Context) {
         localAddress: InetSocketAddress,
         remoteAddress: InetSocketAddress
     ): AppInfo? {
+        // getConnectionOwnerUid понимает только TCP(6) и UDP(17). Любой другой номер
+        // (например -1 для ICMP/прочего) кидает IllegalArgumentException, а не
+        // возвращает "не найдено" — раньше это роняло всё приложение на первом же ping.
+        if (protocol != 6 && protocol != 17) return null
+
         val uid = try {
             connectivityManager.getConnectionOwnerUid(protocol, localAddress, remoteAddress)
-        } catch (e: SecurityException) {
+        } catch (e: Exception) {
+            // подстраховка на будущее: любая ошибка тут не должна валить сервис целиком
             -1
         }
 

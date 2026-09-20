@@ -11,15 +11,19 @@ import java.net.InetAddress
  */
 object TcpPacketBuilder {
 
-    private const val TCP_HEADER_LENGTH = 20 // без опций — для MVP этого достаточно
+    // Консервативный MSS — с запасом ниже обычного MTU 1500 минус IP+TCP заголовки,
+    // чтобы не упереться в фрагментацию на промежуточных сетях.
+    private const val OUR_MSS = 1400
 
     fun build(
         sourceIp: InetAddress, sourcePort: Int,
         destIp: InetAddress, destPort: Int,
         seq: Long, ack: Long, flags: Int, window: Int,
-        payload: ByteArray
+        payload: ByteArray,
+        options: ByteArray = ByteArray(0)
     ): ByteArray {
-        val totalLength = 20 + TCP_HEADER_LENGTH + payload.size
+        val tcpHeaderLength = 20 + options.size // options.size уже кратен 4 у нас (см. mssOption())
+        val totalLength = 20 + tcpHeaderLength + payload.size
         val packet = ByteArray(totalLength)
 
         // --- IPv4 заголовок ---
@@ -40,7 +44,7 @@ object TcpPacketBuilder {
         packet[10] = ((ipChecksum shr 8) and 0xFF).toByte()
         packet[11] = (ipChecksum and 0xFF).toByte()
 
-        // --- TCP заголовок ---
+        // --- TCP заголовок (+ опции, если есть) ---
         val tcpOffset = 20
         packet[tcpOffset] = ((sourcePort shr 8) and 0xFF).toByte()
         packet[tcpOffset + 1] = (sourcePort and 0xFF).toByte()
@@ -50,14 +54,17 @@ object TcpPacketBuilder {
         writeUInt32(packet, tcpOffset + 4, seq)
         writeUInt32(packet, tcpOffset + 8, ack)
 
-        packet[tcpOffset + 12] = (((TCP_HEADER_LENGTH / 4) shl 4) and 0xF0).toByte() // data offset, без опций
+        packet[tcpOffset + 12] = (((tcpHeaderLength / 4) shl 4) and 0xF0).toByte() // data offset
         packet[tcpOffset + 13] = (flags and 0x3F).toByte()
         packet[tcpOffset + 14] = ((window shr 8) and 0xFF).toByte()
         packet[tcpOffset + 15] = (window and 0xFF).toByte()
         packet[tcpOffset + 16] = 0; packet[tcpOffset + 17] = 0 // checksum — посчитаем ниже
         packet[tcpOffset + 18] = 0; packet[tcpOffset + 19] = 0 // urgent pointer — не используем
 
-        System.arraycopy(payload, 0, packet, tcpOffset + TCP_HEADER_LENGTH, payload.size)
+        if (options.isNotEmpty()) {
+            System.arraycopy(options, 0, packet, tcpOffset + 20, options.size)
+        }
+        System.arraycopy(payload, 0, packet, tcpOffset + tcpHeaderLength, payload.size)
 
         val tcpSegment = packet.copyOfRange(tcpOffset, totalLength)
         val tcpChecksum = ChecksumUtils.tcpChecksumWithPseudoHeader(
@@ -69,9 +76,14 @@ object TcpPacketBuilder {
         return packet
     }
 
-    /** Удобные шорткаты для частых комбинаций флагов. */
-    fun synAck(sourceIp: InetAddress, sourcePort: Int, destIp: InetAddress, destPort: Int, seq: Long, ack: Long) =
-        build(sourceIp, sourcePort, destIp, destPort, seq, ack, TcpFlags.SYN or TcpFlags.ACK, 65535, ByteArray(0))
+    /** TCP-опция MSS: kind=2, length=4, значение — 2 байта. Ровно 4 байта, кратно 4. */
+    fun mssOption(): ByteArray {
+        return byteArrayOf(
+            0x02, 0x04,
+            ((OUR_MSS shr 8) and 0xFF).toByte(),
+            (OUR_MSS and 0xFF).toByte()
+        )
+    }
 
     private fun writeUInt32(buffer: ByteArray, offset: Int, value: Long) {
         buffer[offset] = ((value shr 24) and 0xFF).toByte()

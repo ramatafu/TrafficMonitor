@@ -5,9 +5,13 @@ import android.util.Log
 import com.ramatafu.trafficmonitor.parser.TcpFlags
 import com.ramatafu.trafficmonitor.parser.TcpPacketParser
 import com.ramatafu.trafficmonitor.parser.TcpSegment
+import com.ramatafu.trafficmonitor.parser.TlsSniParser
+import com.ramatafu.trafficmonitor.vpn.ConnectionLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext // <--- ДОБАВЛЕН ЭТОТ ИМПОРТ
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.FileOutputStream
@@ -26,34 +30,46 @@ data class TcpSessionKey(
 
 private enum class TcpState { SYN_RECEIVED, ESTABLISHED, CLOSING, CLOSED }
 
-/**
- * Состояние одного TCP-соединения. Мы выступаем "TCP-сервером" для
- * приложения на устройстве (отвечаем на его SYN своим SYN-ACK) и
- * одновременно обычным TCP-клиентом для настоящего сервера в интернете
- * (через java.net.Socket). По сути мы — прозрачный мост между двумя
- * независимыми TCP-соединениями.
- *
- * УПРОЩЕНИЯ (осознанно, для учебного MVP):
- * - нет ретрансмиссий: если наш пакет потеряется по дороге к приложению,
- *   мы не заметим и не пошлём повторно — полагаемся на то, что на
- *   локальном участке (tun-интерфейс) потерь почти не бывает
- * - нет управления окном/перегрузкой — всегда шлём фиксированное окно
- * - закрытие соединения при FIN с любой стороны — сразу закрываем оба
- *   направления, а не поддерживаем честный half-close
- */
-private class TcpSession(val key: TcpSessionKey, val socket: Socket) {
+// Состояние одного TCP-соединения. Мы выступаем "TCP-сервером" для
+// приложения на устройстве (отвечаем на его SYN своим SYN-ACK) и
+// одновременно обычным TCP-клиентом для настоящего сервера в интернете
+// (через java.net.Socket). По сути мы - прозрачный мост между двумя
+// независимыми TCP-соединениями.
+//
+// УПРОЩЕНИЯ, что осталось (осознанно, для учебного MVP):
+// - нет ретрансмиссий: если наш пакет потеряется по дороге к приложению,
+//   мы не заметим и не пошлём повторно - полагаемся на то, что на
+//   локальном участке (tun-интерфейс) потерь почти не бывает
+// - нет управления перегрузкой (congestion control) - только простое
+//   уважение окна получателя (flow control), см. ourSeq/highestAckedByClient
+private class TcpSession(val key: TcpSessionKey, val socket: Socket, val packageName: String) {
     var state = TcpState.SYN_RECEIVED
 
-    // ourSeq — следующий байт последовательности, который МЫ отправим приложению
-    // (сервер -> клиент, с точки зрения устройства)
+    // ourSeq - следующий байт последовательности, который МЫ отправим приложению
     var ourSeq: Long = 0
 
-    // clientSeqNext — следующий байт, который мы ОЖИДАЕМ от приложения;
-    // именно это значение мы указываем в поле ack наших пакетов
+    // clientSeqNext - следующий байт, который мы ОЖИДАЕМ от приложения
     var clientSeqNext: Long = 0
+
+    // Управление окном (flow control): сколько байт мы уже отправили, но
+    // приложение их ещё не подтвердило (highestAckedByClient), и какое
+    // окно приёма оно сейчас рекламирует (clientWindow). Не даём себе
+    // отправить больше, чем клиент готов принять — иначе он просто
+    // отбросит лишнее, а мы решим, что всё доставлено.
+    var highestAckedByClient: Long = 0
+    @Volatile var clientWindow: Int = 65535
 
     var relayJob: Job? = null
     @Volatile var lastActivityMs: Long = System.currentTimeMillis()
+
+    // Честный half-close вместо мгновенного закрытия по первому FIN:
+    // сессия закрывается полностью только когда ОБЕ стороны закончили.
+    var appSentFin = false   // приложение прислало нам FIN
+    var weSentFin = false    // мы прислали приложению FIN (потому что сервер закрылся)
+
+    // Пробуем распознать SNI только один раз - в первом пакете данных
+    // от приложения (там обычно и лежит TLS ClientHello целиком).
+    var sniChecked = false
 }
 
 class TcpForwarder(
@@ -63,8 +79,9 @@ class TcpForwarder(
     private val sessions = ConcurrentHashMap<TcpSessionKey, TcpSession>()
     private val forwarderScope = CoroutineScope(Dispatchers.IO)
 
-    /** @param tcpSegmentBytes сырые байты, начиная с TCP-заголовка (после IP-заголовка) */
-    fun handle(clientIp: String, serverIp: String, tcpSegmentBytes: ByteArray) {
+    // @param tcpSegmentBytes сырые байты, начиная с TCP-заголовка (после IP-заголовка)
+    // @param packageName пакет приложения-инициатора, если удалось определить ("" если нет)
+    fun handle(clientIp: String, serverIp: String, tcpSegmentBytes: ByteArray, packageName: String) {
         val tcp = TcpPacketParser.parse(tcpSegmentBytes) ?: return
         val key = TcpSessionKey(clientIp, tcp.sourcePort, serverIp, tcp.destPort)
 
@@ -75,9 +92,8 @@ class TcpForwarder(
             }
 
             TcpFlags.has(tcp.flags, TcpFlags.SYN) && !TcpFlags.has(tcp.flags, TcpFlags.ACK) -> {
-                if (!sessions.containsKey(key)) startNewConnection(key, tcp)
-                // повторный SYN (ретрансмит из-за задержки нашего SYN-ACK) — игнорируем,
-                // настоящий SYN-ACK уже летит или улетел
+                if (!sessions.containsKey(key)) startNewConnection(key, tcp, packageName)
+                // повторный SYN (ретрансмит из-за задержки нашего SYN-ACK) - игнорируем
             }
 
             else -> {
@@ -87,23 +103,24 @@ class TcpForwarder(
         }
     }
 
-    private fun startNewConnection(key: TcpSessionKey, tcp: TcpSegment) {
-        Log.d(TAG, "Новый SYN: $key")
+    private fun startNewConnection(key: TcpSessionKey, tcp: TcpSegment, packageName: String) {
+        Log.d(TAG, "Новый SYN: $key ($packageName)")
         val socket = Socket()
-        val session = TcpSession(key, socket)
-        session.clientSeqNext = (tcp.sequenceNumber + 1) and 0xFFFFFFFFL // SYN занимает 1 байт последовательности
-        session.ourSeq = Random.nextInt().toLong() and 0xFFFFFFFFL // случайный начальный номер (ISN)
+        val session = TcpSession(key, socket, packageName)
+        session.clientSeqNext = (tcp.sequenceNumber + 1) and 0xFFFFFFFFL
+        session.ourSeq = Random.nextInt().toLong() and 0xFFFFFFFFL
+        session.highestAckedByClient = session.ourSeq
         sessions[key] = session
 
         forwarderScope.launch {
             try {
                 val network = UnderlyingNetworkProvider.find(context)
                 if (network == null) {
-                    Log.w(TAG, "Не нашли не-VPN сеть для $key — нет доступа в интернет")
+                    Log.w(TAG, "Не нашли не-VPN сеть для $key - нет доступа в интернет")
                     sessions.remove(key)
                     return@launch
                 }
-                network.bindSocket(socket) // рабочая замена protect(), см. UnderlyingNetworkProvider
+                network.bindSocket(socket)
                 socket.connect(InetSocketAddress(key.serverIp, key.serverPort), 5000)
                 Log.d(TAG, "Подключились к ${key.serverIp}:${key.serverPort}")
             } catch (e: Exception) {
@@ -112,19 +129,20 @@ class TcpForwarder(
                 return@launch
             }
 
-            // Отвечаем приложению нашим SYN-ACK, завершая нашу половину handshake
+            // Отвечаем приложению нашим SYN-ACK с опцией MSS, завершая нашу половину handshake
             writePacket(
                 TcpPacketBuilder.build(
                     sourceIp = InetAddress.getByName(key.serverIp), sourcePort = key.serverPort,
                     destIp = InetAddress.getByName(key.clientIp), destPort = key.clientPort,
                     seq = session.ourSeq, ack = session.clientSeqNext,
-                    flags = TcpFlags.SYN or TcpFlags.ACK, window = 65535, payload = ByteArray(0)
+                    flags = TcpFlags.SYN or TcpFlags.ACK, window = 65535, payload = ByteArray(0),
+                    options = TcpPacketBuilder.mssOption()
                 )
             )
             Log.d(TAG, "Отправили SYN-ACK для $key")
-            session.ourSeq += 1 // наш SYN тоже "занимает" один номер последовательности
+            session.ourSeq += 1
+            session.highestAckedByClient = session.ourSeq
 
-            // Дальше просто перекладываем байты ответа сервера в TCP-сегменты для приложения
             relayServerResponses(session)
         }
     }
@@ -139,12 +157,17 @@ class TcpForwarder(
             try {
                 while (isActive) {
                     val n = input.read(buffer)
-                    if (n <= 0) { // сервер закрыл соединение — сообщаем об этом приложению через FIN
+                    if (n <= 0) {
                         Log.d(TAG, "Сервер закрыл соединение ${session.key}, шлём FIN")
                         sendFin(session)
+                        session.weSentFin = true
+                        maybeFullyClose(session)
                         break
                     }
-                    Log.d(TAG, "Получили $n байт от сервера ${session.key}, пересылаем в приложение")
+                    // Ждём, пока в окне клиента не появится место — это и есть
+                    // управление потоком: не заваливаем приложение быстрее,
+                    // чем оно готово принимать.
+                    waitForWindowSpace(session, n)
                     sendData(session, buffer.copyOfRange(0, n))
                     session.lastActivityMs = System.currentTimeMillis()
                 }
@@ -154,20 +177,48 @@ class TcpForwarder(
         }
     }
 
+    /** Простое (не идеальное) уважение окна: ждём, пока не отправленных-но-не-подтверждённых байт станет меньше окна. */
+    private suspend fun waitForWindowSpace(session: TcpSession, incomingSize: Int) {
+        var waited = 0
+        while (currentCoroutineContext().isActive) {
+            val inFlight = seqDiff(session.ourSeq, session.highestAckedByClient)
+            val window = session.clientWindow.coerceAtLeast(1) // окно 0 означало бы вечное ожидание
+            if (inFlight + incomingSize <= window || waited >= 2000) return
+            delay(20)
+            waited += 20
+        }
+    }
+
     private fun handleSegment(session: TcpSession, tcp: TcpSegment) {
         session.lastActivityMs = System.currentTimeMillis()
+        session.clientWindow = tcp.window
 
         if (session.state == TcpState.SYN_RECEIVED && TcpFlags.has(tcp.flags, TcpFlags.ACK)) {
             session.state = TcpState.ESTABLISHED
             Log.d(TAG, "Соединение ${session.key} перешло в ESTABLISHED")
         }
 
+        if (TcpFlags.has(tcp.flags, TcpFlags.ACK)) {
+            // Обновляем "самый свежий" ack, который прислал клиент — но только
+            // если он действительно новее (учитывая переполнение 32-битного счётчика)
+            if (seqDiff(tcp.ackNumber, session.highestAckedByClient) > 0) {
+                session.highestAckedByClient = tcp.ackNumber
+            }
+        }
+
         if (tcp.payload.isNotEmpty()) {
+            if (!session.sniChecked) {
+                session.sniChecked = true
+                val domain = TlsSniParser.extractSni(tcp.payload)
+                if (domain != null) {
+                    Log.d(TAG, "SNI для ${session.key}: $domain")
+                    ConnectionLog.recordDomain(session.key.serverIp, session.key.serverPort, domain)
+                }
+            }
             try {
                 session.socket.getOutputStream().write(tcp.payload)
                 session.clientSeqNext = (session.clientSeqNext + tcp.payload.size) and 0xFFFFFFFFL
                 sendAck(session)
-                Log.d(TAG, "Записали ${tcp.payload.size} байт от приложения в сокет ${session.key}")
             } catch (e: Exception) {
                 Log.w(TAG, "Не удалось записать данные в сокет ${session.key}: ${e.message}")
                 closeSession(session.key)
@@ -179,7 +230,19 @@ class TcpForwarder(
             Log.d(TAG, "Получили FIN от приложения для ${session.key}")
             session.clientSeqNext = (session.clientSeqNext + 1) and 0xFFFFFFFFL
             sendAck(session)
-            // Упрощение: не поддерживаем честный half-close, закрываем сессию целиком
+            session.appSentFin = true
+            try {
+                session.socket.shutdownOutput() // half-close: сообщаем реальному серверу, что данных больше не будет
+            } catch (e: Exception) {
+                // сокет уже мог закрыться с другой стороны — не критично
+            }
+            maybeFullyClose(session)
+        }
+    }
+
+    /** Полностью закрываем сессию только когда закончили ОБЕ стороны, а не при первом FIN. */
+    private fun maybeFullyClose(session: TcpSession) {
+        if (session.appSentFin && session.weSentFin) {
             closeSession(session.key)
         }
     }
@@ -232,7 +295,20 @@ class TcpForwarder(
         }
     }
 
-    /** Закрывает соединения, которые молчат дольше timeoutMs — вызывать периодически. */
+    // Закрывает ВСЕ активные сессии указанного пакета - вызывается сразу
+    // при включении блокировки, чтобы разорвать уже открытые соединения.
+    fun closeSessionsForPackage(packageName: String) {
+        val toClose = sessions.entries.filter { it.value.packageName == packageName }
+        toClose.forEach { (key, session) ->
+            Log.d(TAG, "Закрываем сессию $key - приложение $packageName заблокировано")
+            sessions.remove(key)
+            session.relayJob?.cancel()
+            try { session.socket.close() } catch (e: Exception) { }
+        }
+    }
+
+    // Закрывает соединения, которые молчат дольше timeoutMs - вызывать периодически.
+    // Это же ловит сессии, застрявшие в half-close, если вторая сторона так и не закрылась.
     fun cleanupIdleSessions(timeoutMs: Long = 120_000) {
         val now = System.currentTimeMillis()
         sessions.entries.removeIf { (_, session) ->
@@ -251,5 +327,12 @@ class TcpForwarder(
             try { it.socket.close() } catch (e: Exception) { }
         }
         sessions.clear()
+    }
+
+    /** Разница a-b для 32-битных (с переполнением) номеров последовательности, знаковая. */
+    private fun seqDiff(a: Long, b: Long): Long {
+        var diff = (a - b) and 0xFFFFFFFFL
+        if (diff > 0x7FFFFFFFL) diff -= 0x100000000L
+        return diff
     }
 }

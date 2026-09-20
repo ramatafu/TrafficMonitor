@@ -3,10 +3,8 @@ package com.ramatafu.trafficmonitor.vpn
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -27,7 +25,6 @@ import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.InetSocketAddress
-import java.net.Socket
 
 private const val TAG = "LocalVpnService"
 private const val NOTIFICATION_CHANNEL_ID = "traffic_monitor_channel"
@@ -35,10 +32,14 @@ private const val NOTIFICATION_ID = 1
 const val ACTION_STOP_VPN = "com.ramatafu.trafficmonitor.STOP_VPN"
 
 /**
- * MVP-версия: поднимает tun-интерфейс, читает пакеты, логирует их.
- * Пакеты НЕ форвардятся дальше — на этом этапе цель только увидеть,
- * какие приложения и куда стучатся. Реальный интернет на устройстве
- * при активном сервисе работать не будет (это добавится на Этапе 2).
+ * Поднимает tun-интерфейс, читает пакеты, форвардит TCP и UDP через
+ * реальные сокеты (см. UdpForwarder/TcpForwarder), логирует соединения
+ * по приложениям в ConnectionLog для отображения в UI.
+ *
+ * Важно: сокеты форвардеров привязываются к реальной сети через
+ * ConnectivityManager.bindSocket() (см. UnderlyingNetworkProvider), а не
+ * через VpnService.protect() — на ряде устройств protect() стабильно
+ * возвращает false, тогда как bindSocket() работает надёжно.
  */
 class LocalVpnService : VpnService() {
 
@@ -59,6 +60,8 @@ class LocalVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         appResolver = AppResolver(this)
+        BlockListStore.init(this)
+        KnownDomainsStore.init(this)
         createNotificationChannel()
     }
 
@@ -102,11 +105,22 @@ class LocalVpnService : VpnService() {
             val local = InetSocketAddress(parsed.sourceIp, parsed.sourcePort)
             val remote = InetSocketAddress(parsed.destIp, parsed.destPort)
 
-            val appInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val appInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                (parsed.protocol == Protocol.TCP || parsed.protocol == Protocol.UDP)
+            ) {
                 appResolver.resolveByPorts(parsed.protocol.number, local, remote)
             } else null
 
-            ConnectionLog.record(parsed, appInfo?.label ?: "Неизвестно (UID недоступен)")
+            val isBlocked = appInfo != null && BlockListStore.isBlocked(appInfo.packageName)
+
+            ConnectionLog.record(
+                parsed,
+                appInfo?.label ?: "Неизвестно (UID недоступен)",
+                appInfo?.packageName ?: "",
+                isBlocked
+            )
+
+            if (isBlocked) return@TunPacketReader // приложение в чёрном списке — просто не форвардим
 
             when (parsed.protocol) {
                 Protocol.UDP -> {
@@ -115,14 +129,16 @@ class LocalVpnService : VpnService() {
                         udpForwarder?.forward(
                             clientIp = parsed.sourceIp, clientPort = parsed.sourcePort,
                             remoteIp = parsed.destIp, remotePort = parsed.destPort,
-                            payload = transportSegment.copyOfRange(8, transportSegment.size)
+                            payload = transportSegment.copyOfRange(8, transportSegment.size),
+                            packageName = appInfo?.packageName ?: ""
                         )
                     }
                 }
                 Protocol.TCP -> {
                     tcpForwarder?.handle(
                         clientIp = parsed.sourceIp, serverIp = parsed.destIp,
-                        tcpSegmentBytes = transportSegment
+                        tcpSegmentBytes = transportSegment,
+                        packageName = appInfo?.packageName ?: ""
                     )
                 }
                 else -> { /* ICMP и прочее пока не обрабатываем */ }
@@ -139,86 +155,24 @@ class LocalVpnService : VpnService() {
             }
         }
 
-        Log.i(TAG, "VPN интерфейс поднят, форвардим TCP и UDP")
-        _isRunning.value = true
-
-        runProtectCanaryTest()
-    }
-
-    /**
-     * Изолированная проверка: работает ли protect() вообще на этом устройстве,
-     * без шума от реального трафика приложений. Подключается к Google DNS
-     * (8.8.8.8:53 по TCP — этот порт почти никогда не блокируется) и явно
-     * логирует единственный однозначный результат.
-     */
-    private fun runProtectCanaryTest() {
-        Log.i(TAG, "[CANARY] Запускаю тест...")
+        // Как только пользователь включает блокировку приложения — сразу рвём
+        // его уже открытые соединения, а не ждём следующего пакета или таймаута
+        // (без этого долгоживущие сессии вроде XMPP продолжали бы работать).
         serviceScope.launch {
-            Log.i(TAG, "[CANARY] Корутина стартовала")
-
-            // Проверяем гипотезу про тайминг: пробуем protect() несколько раз
-            // с паузой, вдруг сразу после establish() система ещё не готова.
-            var protectedOk = false
-            for (attempt in 1..5) {
-                val testSocket = Socket()
-                val result = protect(testSocket)
-                Log.i(TAG, "[CANARY] Попытка $attempt: protect() вернул $result")
-                testSocket.close()
-                if (result) {
-                    protectedOk = true
-                    break
+            var previouslyBlocked = BlockListStore.blockedPackages.value
+            BlockListStore.blockedPackages.collect { current ->
+                val newlyBlocked = current - previouslyBlocked
+                newlyBlocked.forEach { packageName ->
+                    Log.i(TAG, "Приложение $packageName заблокировано — рвём активные соединения")
+                    tcpForwarder?.closeSessionsForPackage(packageName)
+                    udpForwarder?.closeSessionsForPackage(packageName)
                 }
-                delay(1000)
-            }
-
-            if (!protectedOk) {
-                Log.e(TAG, "[CANARY] protect() так и не вернул true после 5 попыток")
-
-                // Альтернативный путь: явно привязать сокет к "родной" (не-VPN) сети
-                // через ConnectivityManager. Это другой системный механизм —
-                // если он сработает там, где protect() не сработал, будем знать,
-                // что использовать в форвардерах вместо protect().
-                try {
-                    val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                    val networks = cm.allNetworks
-                    Log.i(TAG, "[CANARY] Доступно сетей через ConnectivityManager: ${networks.size}")
-                    for (network in networks) {
-                        val caps = cm.getNetworkCapabilities(network)
-                        val isVpn = caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) ?: false
-                        Log.i(TAG, "[CANARY] Сеть $network, VPN=$isVpn, caps=$caps")
-                        if (!isVpn) {
-                            try {
-                                val altSocket = Socket()
-                                network.bindSocket(altSocket)
-                                val start = System.currentTimeMillis()
-                                altSocket.connect(InetSocketAddress("8.8.8.8", 53), 5000)
-                                val elapsed = System.currentTimeMillis() - start
-                                Log.i(TAG, "[CANARY] bindSocket()+connect через сеть $network УСПЕШНО за ${elapsed}мс")
-                                altSocket.close()
-                            } catch (e: Exception) {
-                                Log.e(TAG, "[CANARY] bindSocket() через сеть $network ПРОВАЛИЛОСЬ: ${e.message}")
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "[CANARY] Ошибка при работе с ConnectivityManager: ${e.javaClass.simpleName}: ${e.message}")
-                }
-                return@launch
-            }
-
-            val socket = Socket()
-            try {
-                protect(socket)
-                val start = System.currentTimeMillis()
-                socket.connect(InetSocketAddress("8.8.8.8", 53), 5000)
-                val elapsed = System.currentTimeMillis() - start
-                Log.i(TAG, "[CANARY] Подключение к 8.8.8.8:53 УСПЕШНО за ${elapsed}мс — protect() работает штатно")
-            } catch (e: Exception) {
-                Log.e(TAG, "[CANARY] Подключение к 8.8.8.8:53 ПРОВАЛИЛОСЬ: ${e.message}")
-            } finally {
-                try { socket.close() } catch (e: Exception) { }
+                previouslyBlocked = current
             }
         }
+
+        Log.i(TAG, "VPN интерфейс поднят, форвардим TCP и UDP")
+        _isRunning.value = true
     }
 
     private fun foregroundServiceType(): Int {
@@ -241,7 +195,7 @@ class LocalVpnService : VpnService() {
 
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Traffic Monitor активен [build: canary-test]")
+            .setContentTitle("Traffic Monitor активен")
             .setContentText("Анализ сетевого трафика приложений")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
