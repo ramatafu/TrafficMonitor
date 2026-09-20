@@ -4,8 +4,10 @@
 /.idea
 .DS_Store
 /build
-app/build/
 /captures
 .externalNativeBuild
 .cxx
-local.properties
+local.properties 
+app/build/
+app/release/
+ <-- ДОБАВИТЬ ЭТУ СТРОКУ
