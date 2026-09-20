@@ -10,9 +10,14 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.ramatafu.trafficmonitor.R
 import com.ramatafu.trafficmonitor.vpn.ACTION_STOP_VPN
+import com.ramatafu.trafficmonitor.vpn.ConnectionEntry
 import com.ramatafu.trafficmonitor.vpn.ConnectionLog
 import com.ramatafu.trafficmonitor.vpn.LocalVpnService
 import kotlinx.coroutines.launch
+
+// Порог для "детектора слива": если приложение отправило больше этого —
+// стоит присмотреться, что оно вообще передаёт наружу.
+private const val DATA_LEAK_THRESHOLD_BYTES = 1_000_000L
 
 class MainActivity : AppCompatActivity() {
 
@@ -92,14 +97,46 @@ class MainActivity : AppCompatActivity() {
                 if (!LocalVpnService.isRunning.value && entries.isEmpty()) return@collect
                 statusText.text = buildString {
                     append("Соединений: ${entries.size}\n\n")
-                    entries.take(20).forEach { entry ->
-                        val destination = entry.domain ?: entry.destIp
-                        val marker = if (entry.blocked) "🚫 " else ""
-                        append("$marker${entry.appLabel} → $destination:${entry.destPort} ")
-                        append("[${entry.protocol}] ${entry.bytes} байт (${entry.packetCount} пак.)\n")
-                    }
+                    entries.take(20).forEach { entry -> append(formatEntry(entry)) }
                 }
             }
+        }
+    }
+
+    private fun formatEntry(entry: ConnectionEntry): String {
+        val destination = entry.domain ?: entry.destIp
+
+        // Маркеры-предупреждения — по мотивам плана: трекер, заблокировано, подозрительная отдача
+        val markers = buildString {
+            if (entry.blocked) append("🚫 ")
+            if (entry.isTracker) append("⚠️трекер ")
+            if (entry.bytesSent > DATA_LEAK_THRESHOLD_BYTES) append("📤слив? ")
+        }
+
+        return buildString {
+            append(markers)
+            append("${entry.appLabel} → $destination:${entry.destPort} [${entry.protocol}]\n")
+            append("  ↑${formatBytes(entry.bytesSent)}  ↓${formatBytes(entry.bytesReceived)}")
+            append("  · ${entry.sessionCount} сесс.")
+            append("  · ${formatRelativeTime(entry.lastActivityMs)}\n")
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes >= 1_000_000 -> String.format("%.1f МБ", bytes / 1_000_000.0)
+            bytes >= 1_000 -> String.format("%.1f КБ", bytes / 1_000.0)
+            else -> "$bytes Б"
+        }
+    }
+
+    private fun formatRelativeTime(timestampMs: Long): String {
+        val diffSec = (System.currentTimeMillis() - timestampMs) / 1000
+        return when {
+            diffSec < 5 -> "только что"
+            diffSec < 60 -> "$diffSec сек назад"
+            diffSec < 3600 -> "${diffSec / 60} мин назад"
+            else -> "${diffSec / 3600} ч назад"
         }
     }
 }

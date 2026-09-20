@@ -1,6 +1,5 @@
 package com.ramatafu.trafficmonitor.vpn
 
-import com.ramatafu.trafficmonitor.parser.ParsedPacket
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -10,15 +9,20 @@ data class ConnectionEntry(
     val destIp: String,
     val destPort: Int,
     val protocol: String,
-    var bytes: Long,
-    var packetCount: Int,
-    var domain: String? = null, // заполняется сразу из KnownDomainsStore либо позже, когда поймаем SNI
+    var bytesSent: Long = 0,      // от приложения к серверу (upload)
+    var bytesReceived: Long = 0,  // от сервера к приложению (download)
+    var sessionCount: Int = 0,    // сколько раз открывалось новое соединение на этот адрес
+    var lastActivityMs: Long = System.currentTimeMillis(),
+    var domain: String? = null,   // заполняется из KnownDomainsStore либо когда поймаем SNI
     var blocked: Boolean = false
-)
+) {
+    val totalBytes: Long get() = bytesSent + bytesReceived
+    val isTracker: Boolean get() = domain?.let { TrackerDomains.isTracker(it) } ?: false
+}
 
 /**
- * Простой in-memory журнал, сгруппированный по (приложение, назначение, порт).
- * Сами соединения не переживают перезапуск (это просто текущая сессия),
+ * Журнал соединений, сгруппированный по (приложение, назначение, порт).
+ * Сами соединения не переживают перезапуск (это текущая сессия монитора),
  * а вот известные домены и список блокировок — уже в Room, см.
  * KnownDomainsStore и BlockListStore.
  */
@@ -28,28 +32,42 @@ object ConnectionLog {
     private val _state = MutableStateFlow<List<ConnectionEntry>>(emptyList())
     val state = _state.asStateFlow()
 
+    /**
+     * Единая точка записи: и форвардеры (реальные отправленные/полученные байты,
+     * новые сессии), и LocalVpnService (пометка "заблокировано") пишут через неё.
+     * Дельты по умолчанию нулевые — вызывающий передаёт только то, что изменилось.
+     */
     @Synchronized
-    fun record(packet: ParsedPacket, appLabel: String, packageName: String, blocked: Boolean) {
-        val key = "$appLabel|${packet.destIp}|${packet.destPort}|${packet.protocol}"
-        val existing = entries[key]
-        if (existing != null) {
-            existing.bytes += packet.totalLength
-            existing.packetCount += 1
-            existing.blocked = blocked
-        } else {
-            entries[key] = ConnectionEntry(
+    fun record(
+        appLabel: String, packageName: String,
+        destIp: String, destPort: Int, protocol: String,
+        blocked: Boolean = false,
+        sentDelta: Long = 0, receivedDelta: Long = 0,
+        newSession: Boolean = false
+    ) {
+        val key = "$appLabel|$destIp|$destPort|$protocol"
+        val entry = entries.getOrPut(key) {
+            ConnectionEntry(
                 appLabel = appLabel,
                 packageName = packageName,
-                destIp = packet.destIp,
-                destPort = packet.destPort,
-                protocol = packet.protocol.name,
-                bytes = packet.totalLength.toLong(),
-                packetCount = 1,
-                domain = KnownDomainsStore.get(packet.destIp, packet.destPort),
-                blocked = blocked
+                destIp = destIp,
+                destPort = destPort,
+                protocol = protocol,
+                domain = KnownDomainsStore.get(destIp, destPort)
             )
         }
-        _state.value = entries.values.sortedByDescending { it.bytes }
+        entry.bytesSent += sentDelta
+        entry.bytesReceived += receivedDelta
+        if (newSession) entry.sessionCount += 1
+        entry.blocked = blocked
+        entry.lastActivityMs = System.currentTimeMillis()
+
+        _state.value = entries.values.sortedByDescending { it.totalBytes }
+    }
+
+    /** Помечает соединение заблокированным — без изменения счётчиков байт/сессий. */
+    fun markBlocked(appLabel: String, packageName: String, destIp: String, destPort: Int, protocol: String) {
+        record(appLabel, packageName, destIp, destPort, protocol, blocked = true)
     }
 
     /**
@@ -68,7 +86,7 @@ object ConnectionLog {
             }
         }
         if (changed) {
-            _state.value = entries.values.sortedByDescending { it.bytes }
+            _state.value = entries.values.sortedByDescending { it.totalBytes }
         }
     }
 

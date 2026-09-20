@@ -10,7 +10,6 @@ import com.ramatafu.trafficmonitor.vpn.ConnectionLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext // <--- ДОБАВЛЕН ЭТОТ ИМПОРТ
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -42,7 +41,10 @@ private enum class TcpState { SYN_RECEIVED, ESTABLISHED, CLOSING, CLOSED }
 //   локальном участке (tun-интерфейс) потерь почти не бывает
 // - нет управления перегрузкой (congestion control) - только простое
 //   уважение окна получателя (flow control), см. ourSeq/highestAckedByClient
-private class TcpSession(val key: TcpSessionKey, val socket: Socket, val packageName: String) {
+private class TcpSession(
+    val key: TcpSessionKey, val socket: Socket,
+    val packageName: String, val appLabel: String
+) {
     var state = TcpState.SYN_RECEIVED
 
     // ourSeq - следующий байт последовательности, который МЫ отправим приложению
@@ -81,7 +83,7 @@ class TcpForwarder(
 
     // @param tcpSegmentBytes сырые байты, начиная с TCP-заголовка (после IP-заголовка)
     // @param packageName пакет приложения-инициатора, если удалось определить ("" если нет)
-    fun handle(clientIp: String, serverIp: String, tcpSegmentBytes: ByteArray, packageName: String) {
+    fun handle(clientIp: String, serverIp: String, tcpSegmentBytes: ByteArray, packageName: String, appLabel: String) {
         val tcp = TcpPacketParser.parse(tcpSegmentBytes) ?: return
         val key = TcpSessionKey(clientIp, tcp.sourcePort, serverIp, tcp.destPort)
 
@@ -92,7 +94,7 @@ class TcpForwarder(
             }
 
             TcpFlags.has(tcp.flags, TcpFlags.SYN) && !TcpFlags.has(tcp.flags, TcpFlags.ACK) -> {
-                if (!sessions.containsKey(key)) startNewConnection(key, tcp, packageName)
+                if (!sessions.containsKey(key)) startNewConnection(key, tcp, packageName, appLabel)
                 // повторный SYN (ретрансмит из-за задержки нашего SYN-ACK) - игнорируем
             }
 
@@ -103,10 +105,10 @@ class TcpForwarder(
         }
     }
 
-    private fun startNewConnection(key: TcpSessionKey, tcp: TcpSegment, packageName: String) {
+    private fun startNewConnection(key: TcpSessionKey, tcp: TcpSegment, packageName: String, appLabel: String) {
         Log.d(TAG, "Новый SYN: $key ($packageName)")
         val socket = Socket()
-        val session = TcpSession(key, socket, packageName)
+        val session = TcpSession(key, socket, packageName, appLabel)
         session.clientSeqNext = (tcp.sequenceNumber + 1) and 0xFFFFFFFFL
         session.ourSeq = Random.nextInt().toLong() and 0xFFFFFFFFL
         session.highestAckedByClient = session.ourSeq
@@ -123,6 +125,10 @@ class TcpForwarder(
                 network.bindSocket(socket)
                 socket.connect(InetSocketAddress(key.serverIp, key.serverPort), 5000)
                 Log.d(TAG, "Подключились к ${key.serverIp}:${key.serverPort}")
+                ConnectionLog.record(
+                    appLabel, packageName, key.serverIp, key.serverPort, "TCP",
+                    newSession = true
+                )
             } catch (e: Exception) {
                 Log.w(TAG, "Не удалось подключиться к ${key.serverIp}:${key.serverPort}: ${e.message}")
                 sessions.remove(key)
@@ -170,6 +176,11 @@ class TcpForwarder(
                     waitForWindowSpace(session, n)
                     sendData(session, buffer.copyOfRange(0, n))
                     session.lastActivityMs = System.currentTimeMillis()
+                    ConnectionLog.record(
+                        session.appLabel, session.packageName,
+                        session.key.serverIp, session.key.serverPort, "TCP",
+                        receivedDelta = n.toLong()
+                    )
                 }
             } catch (e: Exception) {
                 Log.d(TAG, "relayServerResponses завершился для ${session.key}: ${e.message}")
@@ -180,11 +191,11 @@ class TcpForwarder(
     /** Простое (не идеальное) уважение окна: ждём, пока не отправленных-но-не-подтверждённых байт станет меньше окна. */
     private suspend fun waitForWindowSpace(session: TcpSession, incomingSize: Int) {
         var waited = 0
-        while (currentCoroutineContext().isActive) {
+        while (true) {
             val inFlight = seqDiff(session.ourSeq, session.highestAckedByClient)
             val window = session.clientWindow.coerceAtLeast(1) // окно 0 означало бы вечное ожидание
             if (inFlight + incomingSize <= window || waited >= 2000) return
-            delay(20)
+            delay(20) // сама delay() бросит исключение при отмене корутины — этого достаточно
             waited += 20
         }
     }
@@ -219,6 +230,11 @@ class TcpForwarder(
                 session.socket.getOutputStream().write(tcp.payload)
                 session.clientSeqNext = (session.clientSeqNext + tcp.payload.size) and 0xFFFFFFFFL
                 sendAck(session)
+                ConnectionLog.record(
+                    session.appLabel, session.packageName,
+                    session.key.serverIp, session.key.serverPort, "TCP",
+                    sentDelta = tcp.payload.size.toLong()
+                )
             } catch (e: Exception) {
                 Log.w(TAG, "Не удалось записать данные в сокет ${session.key}: ${e.message}")
                 closeSession(session.key)

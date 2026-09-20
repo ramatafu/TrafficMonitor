@@ -111,16 +111,16 @@ class LocalVpnService : VpnService() {
                 appResolver.resolveByPorts(parsed.protocol.number, local, remote)
             } else null
 
-            val isBlocked = appInfo != null && BlockListStore.isBlocked(appInfo.packageName)
+            val appLabel = appInfo?.label ?: "Неизвестно (UID недоступен)"
+            val packageName = appInfo?.packageName ?: ""
+            val isBlocked = appInfo != null && BlockListStore.isBlocked(packageName)
 
-            ConnectionLog.record(
-                parsed,
-                appInfo?.label ?: "Неизвестно (UID недоступен)",
-                appInfo?.packageName ?: "",
-                isBlocked
-            )
-
-            if (isBlocked) return@TunPacketReader // приложение в чёрном списке — просто не форвардим
+            if (isBlocked) {
+                // приложение в чёрном списке — просто не форвардим, но отмечаем в логе,
+                // чтобы было видно, что именно заблокировано
+                ConnectionLog.markBlocked(appLabel, packageName, parsed.destIp, parsed.destPort, parsed.protocol.name)
+                return@TunPacketReader
+            }
 
             when (parsed.protocol) {
                 Protocol.UDP -> {
@@ -130,7 +130,8 @@ class LocalVpnService : VpnService() {
                             clientIp = parsed.sourceIp, clientPort = parsed.sourcePort,
                             remoteIp = parsed.destIp, remotePort = parsed.destPort,
                             payload = transportSegment.copyOfRange(8, transportSegment.size),
-                            packageName = appInfo?.packageName ?: ""
+                            packageName = packageName,
+                            appLabel = appLabel
                         )
                     }
                 }
@@ -138,7 +139,8 @@ class LocalVpnService : VpnService() {
                     tcpForwarder?.handle(
                         clientIp = parsed.sourceIp, serverIp = parsed.destIp,
                         tcpSegmentBytes = transportSegment,
-                        packageName = appInfo?.packageName ?: ""
+                        packageName = packageName,
+                        appLabel = appLabel
                     )
                 }
                 else -> { /* ICMP и прочее пока не обрабатываем */ }

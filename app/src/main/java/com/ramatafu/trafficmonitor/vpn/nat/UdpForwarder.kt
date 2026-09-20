@@ -2,6 +2,7 @@ package com.ramatafu.trafficmonitor.vpn.nat
 
 import android.content.Context
 import android.util.Log
+import com.ramatafu.trafficmonitor.vpn.ConnectionLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,7 +25,10 @@ data class UdpSessionKey(
     val remoteIp: String, val remotePort: Int
 )
 
-private class UdpSession(val socket: DatagramSocket, val key: UdpSessionKey, val packageName: String) {
+private class UdpSession(
+    val socket: DatagramSocket, val key: UdpSessionKey,
+    val packageName: String, val appLabel: String
+) {
     var readerJob: Job? = null
     @Volatile var lastActivityMs: Long = System.currentTimeMillis()
 }
@@ -47,23 +51,29 @@ class UdpForwarder(
         clientIp: String, clientPort: Int,
         remoteIp: String, remotePort: Int,
         payload: ByteArray,
-        packageName: String
+        packageName: String,
+        appLabel: String
     ) {
         val key = UdpSessionKey(clientIp, clientPort, remoteIp, remotePort)
-        val session = sessions.getOrPut(key) { createSession(key, packageName) } ?: return
+        val isNew = !sessions.containsKey(key)
+        val session = sessions.getOrPut(key) { createSession(key, packageName, appLabel) } ?: return
 
         try {
             val remoteAddress = InetAddress.getByName(remoteIp)
             val packet = DatagramPacket(payload, payload.size, remoteAddress, remotePort)
             session.socket.send(packet)
             session.lastActivityMs = System.currentTimeMillis()
+            ConnectionLog.record(
+                appLabel, packageName, remoteIp, remotePort, "UDP",
+                sentDelta = payload.size.toLong(), newSession = isNew
+            )
         } catch (e: Exception) {
             Log.w(TAG, "Не удалось отправить UDP пакет: ${e.message}")
             closeSession(key)
         }
     }
 
-    private fun createSession(key: UdpSessionKey, packageName: String): UdpSession? {
+    private fun createSession(key: UdpSessionKey, packageName: String, appLabel: String): UdpSession? {
         val network = UnderlyingNetworkProvider.find(context)
         if (network == null) {
             Log.w(TAG, "Не нашли не-VPN сеть для UDP $key — нет доступа в интернет")
@@ -81,7 +91,7 @@ class UdpForwarder(
             return null
         }
 
-        val session = UdpSession(socket, key, packageName)
+        val session = UdpSession(socket, key, packageName, appLabel)
         session.readerJob = forwarderScope.launch {
             val buffer = ByteArray(32 * 1024)
             while (isActive) {
@@ -99,6 +109,10 @@ class UdpForwarder(
                         tunOutput.write(response)
                     }
                     session.lastActivityMs = System.currentTimeMillis()
+                    ConnectionLog.record(
+                        appLabel, packageName, key.remoteIp, key.remotePort, "UDP",
+                        receivedDelta = incoming.length.toLong()
+                    )
                 } catch (e: Exception) {
                     // сокет закрылся (таймаут сессии) — нормальное завершение цикла
                     break
