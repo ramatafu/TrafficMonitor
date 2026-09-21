@@ -148,12 +148,20 @@ class LocalVpnService : VpnService() {
         }
         packetReader?.start(serviceScope)
 
-        // Периодически закрываем "молчащие" сессии, иначе сокеты будут копиться
+        // Периодически закрываем "молчащие" сессии, иначе сокеты будут копиться.
+        // Заодно, для подстраховки, повторно закрываем сессии уже заблокированных
+        // приложений — на случай, если разовое реактивное закрытие ниже почему-то
+        // не сработало (например, гонка при разрешении пакета для shared UID).
         serviceScope.launch {
             while (true) {
                 delay(30_000)
                 udpForwarder?.cleanupIdleSessions()
                 tcpForwarder?.cleanupIdleSessions()
+
+                BlockListStore.blockedPackages.value.forEach { packageName ->
+                    tcpForwarder?.closeSessionsForPackage(packageName)
+                    udpForwarder?.closeSessionsForPackage(packageName)
+                }
             }
         }
 

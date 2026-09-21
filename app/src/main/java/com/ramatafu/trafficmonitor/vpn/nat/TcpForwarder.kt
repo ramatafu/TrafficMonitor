@@ -296,6 +296,23 @@ class TcpForwarder(
         session.ourSeq += 1
     }
 
+    /**
+     * Явный RST в сторону приложения — используется только при ПРИНУДИТЕЛЬНОМ
+     * разрыве (блокировка, RST от сервера). Без этого устройство продолжало бы
+     * думать, что соединение живо, пока само не решит, что оно протухло
+     * (может занять минуты) — именно это и выглядело как "блокировка не работает".
+     */
+    private fun sendRst(session: TcpSession) {
+        writePacket(
+            TcpPacketBuilder.build(
+                sourceIp = InetAddress.getByName(session.key.serverIp), sourcePort = session.key.serverPort,
+                destIp = InetAddress.getByName(session.key.clientIp), destPort = session.key.clientPort,
+                seq = session.ourSeq, ack = session.clientSeqNext,
+                flags = TcpFlags.RST or TcpFlags.ACK, window = 0, payload = ByteArray(0)
+            )
+        )
+    }
+
     private fun writePacket(packet: ByteArray) {
         try {
             synchronized(tunOutput) { tunOutput.write(packet) }
@@ -313,11 +330,14 @@ class TcpForwarder(
 
     // Закрывает ВСЕ активные сессии указанного пакета - вызывается сразу
     // при включении блокировки, чтобы разорвать уже открытые соединения.
+    // Шлём RST приложению, а не просто рвём сокет со своей стороны —
+    // иначе устройство ещё долго считало бы соединение живым.
     fun closeSessionsForPackage(packageName: String) {
         val toClose = sessions.entries.filter { it.value.packageName == packageName }
         toClose.forEach { (key, session) ->
             Log.d(TAG, "Закрываем сессию $key - приложение $packageName заблокировано")
             sessions.remove(key)
+            sendRst(session)
             session.relayJob?.cancel()
             try { session.socket.close() } catch (e: Exception) { }
         }

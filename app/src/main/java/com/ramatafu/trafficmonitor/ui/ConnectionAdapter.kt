@@ -50,7 +50,14 @@ class ConnectionAdapter : RecyclerView.Adapter<ConnectionAdapter.ViewHolder>() {
         holder.destination.text = "${entry.domain ?: entry.destIp}:${entry.destPort}"
         holder.protocol.text = entry.protocol
 
-        holder.data.text = "↑${formatBytes(entry.bytesSent)} ↓${formatBytes(entry.bytesReceived)}"
+        if (entry.blocked) {
+            // При блокировке байты не растут (мы не форвардим) — вместо этого
+            // явно показываем, сколько раз приложение уже пыталось достучаться,
+            // чтобы не путать "заблокировано" с "почему-то ничего не происходит".
+            holder.data.text = "попыток: ${entry.blockedAttempts}"
+        } else {
+            holder.data.text = "↑${formatBytes(entry.bytesSent)} ↓${formatBytes(entry.bytesReceived)}"
+        }
         holder.time.text = formatRelativeTime(entry.lastActivityMs)
     }
 

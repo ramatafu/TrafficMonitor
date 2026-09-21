@@ -14,7 +14,8 @@ data class ConnectionEntry(
     var sessionCount: Int = 0,    // сколько раз открывалось новое соединение на этот адрес
     var lastActivityMs: Long = System.currentTimeMillis(),
     var domain: String? = null,   // заполняется из KnownDomainsStore либо когда поймаем SNI
-    var blocked: Boolean = false
+    var blocked: Boolean = false,
+    var blockedAttempts: Int = 0  // сколько раз приложение пыталось достучаться уже ПОСЛЕ блокировки
 ) {
     val totalBytes: Long get() = bytesSent + bytesReceived
     val isTracker: Boolean get() = domain?.let { TrackerDomains.isTracker(it) } ?: false
@@ -25,12 +26,23 @@ data class ConnectionEntry(
  * Сами соединения не переживают перезапуск (это текущая сессия монитора),
  * а вот известные домены и список блокировок — уже в Room, см.
  * KnownDomainsStore и BlockListStore.
+ *
+ * Важный нюанс группировки: один и тот же домен (особенно за CDN) может
+ * резолвиться в разные IP от раза к разу. Поэтому ключ строится не по
+ * голому IP, а по домену, если он уже известен — а когда домен становится
+ * известен ПОЗЖЕ (поймали SNI в середине сессии, которая начиналась как
+ * запись по IP), существующая запись переагрегируется под доменный ключ
+ * (см. recordDomain). Без этого в списке появлялись бы дубли вроде
+ * "site.com" и "1.2.3.4" за один и тот же реальный сервис.
  */
 object ConnectionLog {
 
     private val entries = LinkedHashMap<String, ConnectionEntry>()
     private val _state = MutableStateFlow<List<ConnectionEntry>>(emptyList())
     val state = _state.asStateFlow()
+
+    private fun keyFor(appLabel: String, destPart: String, destPort: Int, protocol: String) =
+        "$appLabel|$destPart|$destPort|$protocol"
 
     /**
      * Единая точка записи: и форвардеры (реальные отправленные/полученные байты,
@@ -45,7 +57,8 @@ object ConnectionLog {
         sentDelta: Long = 0, receivedDelta: Long = 0,
         newSession: Boolean = false
     ) {
-        val key = "$appLabel|$destIp|$destPort|$protocol"
+        val knownDomain = KnownDomainsStore.get(destIp, destPort)
+        val key = keyFor(appLabel, knownDomain ?: destIp, destPort, protocol)
         val entry = entries.getOrPut(key) {
             ConnectionEntry(
                 appLabel = appLabel,
@@ -53,7 +66,7 @@ object ConnectionLog {
                 destIp = destIp,
                 destPort = destPort,
                 protocol = protocol,
-                domain = KnownDomainsStore.get(destIp, destPort)
+                domain = knownDomain
             )
         }
         entry.bytesSent += sentDelta
@@ -65,29 +78,58 @@ object ConnectionLog {
         _state.value = entries.values.sortedByDescending { it.totalBytes }
     }
 
-    /** Помечает соединение заблокированным — без изменения счётчиков байт/сессий. */
+    /** Помечает соединение заблокированным и увеличивает счётчик попыток — без изменения байт/сессий. */
+    @Synchronized
     fun markBlocked(appLabel: String, packageName: String, destIp: String, destPort: Int, protocol: String) {
-        record(appLabel, packageName, destIp, destPort, protocol, blocked = true)
+        val knownDomain = KnownDomainsStore.get(destIp, destPort)
+        val key = keyFor(appLabel, knownDomain ?: destIp, destPort, protocol)
+        val entry = entries.getOrPut(key) {
+            ConnectionEntry(
+                appLabel = appLabel, packageName = packageName,
+                destIp = destIp, destPort = destPort, protocol = protocol,
+                domain = knownDomain
+            )
+        }
+        entry.blocked = true
+        entry.blockedAttempts += 1
+        entry.lastActivityMs = System.currentTimeMillis()
+        _state.value = entries.values.sortedByDescending { it.totalBytes }
     }
 
     /**
-     * Вызывается форвардером, когда удалось вытащить домен из SNI —
-     * проставляем его во все TCP-записи на этот IP:порт (обычно она одна)
-     * и запоминаем в KnownDomainsStore для будущих сессий.
+     * Вызывается форвардером, когда удалось вытащить домен из SNI.
+     * Запоминаем домен в KnownDomainsStore для будущих сессий, и — если
+     * запись на этот ip:port существовала ещё без домена (ключ был по IP) —
+     * переносим её накопленные байты/сессии под новый ключ по домену,
+     * сливая с уже существующей записью на этот домен, если она есть
+     * (именно так лечится дубль "site.com" / "1.2.3.4" для одного сервиса).
      */
     @Synchronized
     fun recordDomain(destIp: String, destPort: Int, domain: String) {
         KnownDomainsStore.record(destIp, destPort, domain)
-        var changed = false
-        entries.values.forEach { entry ->
-            if (entry.destIp == destIp && entry.destPort == destPort && entry.protocol == "TCP" && entry.domain == null) {
-                entry.domain = domain
-                changed = true
+
+        val toMigrate = entries.entries
+            .filter { (_, e) -> e.destIp == destIp && e.destPort == destPort && e.protocol == "TCP" && e.domain == null }
+            .toList()
+
+        if (toMigrate.isEmpty()) return
+
+        toMigrate.forEach { (oldKey, entry) ->
+            entries.remove(oldKey)
+            entry.domain = domain
+            val newKey = keyFor(entry.appLabel, domain, entry.destPort, entry.protocol)
+            val existing = entries[newKey]
+            if (existing != null) {
+                existing.bytesSent += entry.bytesSent
+                existing.bytesReceived += entry.bytesReceived
+                existing.sessionCount += entry.sessionCount
+                existing.lastActivityMs = maxOf(existing.lastActivityMs, entry.lastActivityMs)
+                existing.blocked = existing.blocked || entry.blocked
+            } else {
+                entries[newKey] = entry
             }
         }
-        if (changed) {
-            _state.value = entries.values.sortedByDescending { it.totalBytes }
-        }
+        _state.value = entries.values.sortedByDescending { it.totalBytes }
     }
 
     /** Список уникальных приложений, которые уже засветились в трафике (для экрана блокировки). */

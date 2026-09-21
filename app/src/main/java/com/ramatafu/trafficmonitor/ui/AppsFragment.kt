@@ -1,5 +1,8 @@
 package com.ramatafu.trafficmonitor.ui
 
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import androidx.fragment.app.Fragment
@@ -48,10 +51,31 @@ class AppsFragment : Fragment(R.layout.fragment_apps) {
                 packageName = packageName,
                 label = label,
                 icon = IconCache.get(requireContext(), packageName),
-                blocked = packageName in blockedPackages
+                blocked = packageName in blockedPackages,
+                isSystem = isSystemOrSharedUid(packageName)
             )
         }.sortedBy { it.label.lowercase() }
 
         adapter.submitList(rows)
+    }
+
+    /**
+     * Системное приложение или общий UID (несколько пакетов сидят на одном UID —
+     * типично для системных компонентов вроде телефонии) — блокировка такого
+     * пакета может задеть больше, чем кажется на первый взгляд.
+     */
+    private fun isSystemOrSharedUid(packageName: String): Boolean {
+        val pm = requireContext().packageManager
+        return try {
+            val info = pm.getApplicationInfo(packageName, 0)
+            val isSystemFlag = (info.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0
+            val isLowUid = info.uid < 10000 // ниже Process.FIRST_APPLICATION_UID — системный диапазон
+            val sharesUidWithOthers = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                pm.getPackagesForUid(info.uid)?.size?.let { it > 1 } ?: false
+            } else false
+            isSystemFlag || isLowUid || sharesUidWithOthers
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
     }
 }

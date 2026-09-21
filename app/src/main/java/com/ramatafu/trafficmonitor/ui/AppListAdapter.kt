@@ -1,5 +1,6 @@
 package com.ramatafu.trafficmonitor.ui
 
+import android.app.AlertDialog
 import android.graphics.drawable.Drawable
 import android.view.LayoutInflater
 import android.view.ViewGroup
@@ -13,7 +14,8 @@ data class AppRow(
     val packageName: String,
     val label: String,
     val icon: Drawable?,
-    val blocked: Boolean
+    val blocked: Boolean,
+    val isSystem: Boolean = false // системное приложение / общий UID — блокировать с осторожностью
 )
 
 class AppListAdapter(
@@ -43,7 +45,7 @@ class AppListAdapter(
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val row = rows[position]
         holder.icon.setImageDrawable(row.icon)
-        holder.label.text = row.label
+        holder.label.text = if (row.isSystem) "⚠️ ${row.label} (системное)" else row.label
         holder.packageText.text = row.packageName
 
         // снимаем слушатель перед программной установкой состояния,
@@ -51,8 +53,30 @@ class AppListAdapter(
         holder.toggle.setOnCheckedChangeListener(null)
         holder.toggle.isChecked = row.blocked
         holder.toggle.setOnCheckedChangeListener { _, checked ->
-            onToggle(row.packageName, checked)
+            if (checked && row.isSystem) {
+                // Блокировка системного приложения / общего UID может задеть
+                // не только его одного (например, общий UID с телефонией или
+                // сетевыми проверками системы) — переспрашиваем явно.
+                confirmSystemBlock(holder, row)
+            } else {
+                onToggle(row.packageName, checked)
+            }
         }
+    }
+
+    private fun confirmSystemBlock(holder: ViewHolder, row: AppRow) {
+        AlertDialog.Builder(holder.itemView.context)
+            .setTitle("Заблокировать системное приложение?")
+            .setMessage(
+                "«${row.label}» помечено как системное или использует общий UID с другими " +
+                    "системными процессами. Блокировка может неожиданно повлиять на телефонию, " +
+                    "сетевые проверки или другие системные функции, а не только на это приложение.\n\n" +
+                    "Заблокировать всё равно?"
+            )
+            .setPositiveButton("Заблокировать") { _, _ -> onToggle(row.packageName, true) }
+            .setNegativeButton("Отмена") { _, _ -> holder.toggle.isChecked = false }
+            .setOnCancelListener { holder.toggle.isChecked = false }
+            .show()
     }
 
     override fun getItemCount(): Int = rows.size
