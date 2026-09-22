@@ -1,5 +1,6 @@
 package com.ramatafu.trafficmonitor.ui
 
+import android.app.AlertDialog
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -8,6 +9,7 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.ramatafu.trafficmonitor.R
 import com.ramatafu.trafficmonitor.vpn.ConnectionEntry
+import com.ramatafu.trafficmonitor.vpn.DomainBlockListStore
 
 class ConnectionAdapter : RecyclerView.Adapter<ConnectionAdapter.ViewHolder>() {
 
@@ -40,8 +42,11 @@ class ConnectionAdapter : RecyclerView.Adapter<ConnectionAdapter.ViewHolder>() {
 
         holder.icon.setImageDrawable(IconCache.get(context, entry.packageName))
 
+        val domainBlocked = entry.domain?.let { DomainBlockListStore.isBlocked(it) } ?: false
+
         val markers = buildString {
             if (entry.blocked) append("🚫 ")
+            if (domainBlocked) append("⛔ ")
             if (entry.isTracker) append("⚠️ ")
         }
         holder.appLabel.text = "$markers${entry.appLabel}"
@@ -59,6 +64,34 @@ class ConnectionAdapter : RecyclerView.Adapter<ConnectionAdapter.ViewHolder>() {
             holder.data.text = "↑${formatBytes(entry.bytesSent)} ↓${formatBytes(entry.bytesReceived)}"
         }
         holder.time.text = formatRelativeTime(entry.lastActivityMs)
+
+        // Тап по строке с известным доменом — предложить заблокировать/разблокировать
+        // именно этот домен (для всех приложений сразу), а не всё приложение целиком.
+        holder.itemView.setOnClickListener {
+            val domain = entry.domain
+            if (domain != null) showDomainBlockDialog(context, domain, domainBlocked)
+        }
+    }
+
+    private fun showDomainBlockDialog(context: android.content.Context, domain: String, currentlyBlocked: Boolean) {
+        if (currentlyBlocked) {
+            AlertDialog.Builder(context)
+                .setTitle(domain)
+                .setMessage("Домен сейчас заблокирован для всех приложений. Разблокировать?")
+                .setPositiveButton("Разблокировать") { _, _ -> DomainBlockListStore.setBlocked(domain, false) }
+                .setNegativeButton("Отмена", null)
+                .show()
+        } else {
+            AlertDialog.Builder(context)
+                .setTitle(domain)
+                .setMessage(
+                    "Заблокировать этот домен для ВСЕХ приложений? " +
+                        "Новые DNS-запросы и TLS-соединения к нему будут обрываться."
+                )
+                .setPositiveButton("Заблокировать") { _, _ -> DomainBlockListStore.setBlocked(domain, true) }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
     }
 
     override fun getItemCount(): Int = rows.size

@@ -1,33 +1,150 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="@color/app_background"
-    android:padding="24dp">
+    android:background="@color/app_background">
 
-    <TextView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Traffic Monitor"
-        android:textColor="@color/app_text_primary"
-        android:textSize="20sp"
-        android:textStyle="bold" />
+        android:orientation="vertical"
+        android:padding="24dp">
 
-    <TextView
-        android:id="@+id/settingsVersion"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:textColor="@color/app_text_secondary"
-        android:textSize="13sp" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textColor="@color/app_text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold" />
 
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:text="Локальный монитор сетевого трафика. Работает полностью на устройстве, без серверов и передачи данных третьим лицам."
-        android:textColor="@color/app_text_secondary"
-        android:textSize="14sp" />
+        <TextView
+            android:id="@+id/settingsVersion"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
 
-</LinearLayout>
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Локальный монитор сетевого трафика и файрвол. Работает полностью на устройстве, без серверов и передачи данных третьим лицам."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="14sp" />
+
+        <!-- О значках -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="Значки в списке соединений"
+            android:textColor="@color/app_text_primary"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="🚫 — приложение заблокировано целиком (вкладка «Приложения»). Трафик не пересылается вообще; счётчик «попыток» показывает, сколько раз оно всё ещё пыталось достучаться."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="⛔ — конкретный домен заблокирован для ВСЕХ приложений (нажми на строку с доменом, чтобы включить/выключить). DNS-запросы к нему получают NXDOMAIN, TLS-соединения обрываются."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="⚠️ (в списке соединений) — домен похож на трекер/рекламную сеть по нашему эвристическому списку. Это только подсказка: сам по себе он ничего не блокирует, решение — за тобой."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="⚠️ (системное) (во вкладке «Приложения») — приложение системное или делит UID с другими системными процессами (например, «Телефонные звонки»). Блокировка такого пакета может задеть больше, чем кажется — перед включением попросим подтверждение ещё раз."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <!-- Что можно блокировать, а что нет -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="Что можно блокировать, а что нет"
+            android:textColor="@color/app_text_primary"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Безопасно: любое обычное приложение без пометки «системное» — блокируй целиком, если хочешь отрезать ему интернет. Любой домен с пометкой ⚠️ (трекер) — блокируй тапом по строке, это не ломает функционал."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Осторожно или вообще не надо: приложения с пометкой «⚠️ (системное)» — не блокируй целиком (например, «Телефонные звонки» может сломать звонки/VoLTE). Google Play Cервисы (com.google.android.gms) — от них зависят push-уведомления и функции других приложений. «Система» (android) — часто включает DNS и базовые сетевые проверки."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Главное правило: если сомневаешься — выбирай более точечный вариант. Блок домена (⛔) отрезает только конкретный сервис, не всё приложение. Всё обратимо одним тапом, так что можно спокойно экспериментировать."
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <!-- Разработка -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="Разработка"
+            android:textColor="@color/app_text_primary"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Идея, дизайн, тестирование: ram\nГенерация кода: Claude Code (Anthropic)\nКонсультация: DeepSeek"
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/settingsGithubLink"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:autoLink="web"
+            android:text="https://github.com/ramatafu/TrafficMonitor"
+            android:textColor="@color/app_accent"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Лицензия: GNU General Public License v3.0 (GPLv3)"
+            android:textColor="@color/app_text_secondary"
+            android:textSize="13sp" />
+
+    </LinearLayout>
+</ScrollView>

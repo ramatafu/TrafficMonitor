@@ -26,3 +26,15 @@ interface KnownDomainDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: KnownDomainEntity)
 }
+
+@Dao
+interface BlockedDomainDao {
+    @Query("SELECT domain FROM blocked_domains")
+    fun observeAll(): Flow<List<String>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: BlockedDomainEntity)
+
+    @Query("DELETE FROM blocked_domains WHERE domain = :domain")
+    suspend fun delete(domain: String)
+}

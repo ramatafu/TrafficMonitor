@@ -12,8 +12,8 @@ android {
         applicationId = "com.ramatafu.trafficmonitor"
         minSdk = 29 // нужен для ConnectivityManager.getConnectionOwnerUid()
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1-mvp"
+        versionCode = 4
+        versionName = "0.0.4"
     }
 
     buildTypes {

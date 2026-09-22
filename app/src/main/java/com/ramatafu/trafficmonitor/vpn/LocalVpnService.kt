@@ -12,8 +12,10 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.ramatafu.trafficmonitor.parser.Protocol
 import com.ramatafu.trafficmonitor.resolver.AppResolver
+import com.ramatafu.trafficmonitor.vpn.nat.DnsSinkhole
 import com.ramatafu.trafficmonitor.vpn.nat.TcpForwarder
 import com.ramatafu.trafficmonitor.vpn.nat.UdpForwarder
+import com.ramatafu.trafficmonitor.vpn.nat.UdpPacketBuilder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.InetAddress
 import java.net.InetSocketAddress
 
 private const val TAG = "LocalVpnService"
@@ -62,6 +65,7 @@ class LocalVpnService : VpnService() {
         appResolver = AppResolver(this)
         BlockListStore.init(this)
         KnownDomainsStore.init(this)
+        DomainBlockListStore.init(this)
         createNotificationChannel()
     }
 
@@ -126,10 +130,33 @@ class LocalVpnService : VpnService() {
                 Protocol.UDP -> {
                     // UDP-заголовок фиксированной длины 8 байт, дальше — полезная нагрузка
                     if (transportSegment.size > 8) {
+                        val udpPayload = transportSegment.copyOfRange(8, transportSegment.size)
+
+                        // DNS-sinkhole: если это запрос на порт 53 и запрошенный домен
+                        // в чёрном списке — отвечаем NXDOMAIN сами, не пересылая запрос
+                        // реальному DNS-серверу вообще. Так домен блокируется ещё до
+                        // того, как приложение узнает его IP.
+                        if (parsed.destPort == 53) {
+                            val queryName = DnsSinkhole.extractQueryName(udpPayload)
+                            if (queryName != null && DomainBlockListStore.isBlocked(queryName)) {
+                                Log.i(TAG, "DNS-sinkhole: $queryName заблокирован, отвечаем NXDOMAIN")
+                                val nxResponse = DnsSinkhole.buildNxDomainResponse(udpPayload)
+                                if (nxResponse != null) {
+                                    val packet = UdpPacketBuilder.build(
+                                        sourceIp = InetAddress.getByName(parsed.destIp), sourcePort = parsed.destPort,
+                                        destIp = InetAddress.getByName(parsed.sourceIp), destPort = parsed.sourcePort,
+                                        payload = nxResponse
+                                    )
+                                    synchronized(output) { output.write(packet) }
+                                }
+                                return@TunPacketReader
+                            }
+                        }
+
                         udpForwarder?.forward(
                             clientIp = parsed.sourceIp, clientPort = parsed.sourcePort,
                             remoteIp = parsed.destIp, remotePort = parsed.destPort,
-                            payload = transportSegment.copyOfRange(8, transportSegment.size),
+                            payload = udpPayload,
                             packageName = packageName,
                             appLabel = appLabel
                         )

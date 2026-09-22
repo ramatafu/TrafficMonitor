@@ -6,13 +6,14 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [BlockedAppEntity::class, KnownDomainEntity::class],
-    version = 1,
+    entities = [BlockedAppEntity::class, KnownDomainEntity::class, BlockedDomainEntity::class],
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun blockedAppDao(): BlockedAppDao
     abstract fun knownDomainDao(): KnownDomainDao
+    abstract fun blockedDomainDao(): BlockedDomainDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
@@ -23,7 +24,13 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "traffic_monitor.db"
-                ).build().also { instance = it }
+                )
+                    // Схема поменялась (добавилась таблица доменов) — миграций пока
+                    // не пишем, при повышении версии база просто пересоздаётся.
+                    // Значит, старый список заблокированных приложений на этом
+                    // обновлении один раз сотрётся — для MVP это приемлемо.
+                    .fallbackToDestructiveMigration()
+                    .build().also { instance = it }
             }
         }
     }

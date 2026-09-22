@@ -7,6 +7,7 @@ import com.ramatafu.trafficmonitor.parser.TcpPacketParser
 import com.ramatafu.trafficmonitor.parser.TcpSegment
 import com.ramatafu.trafficmonitor.parser.TlsSniParser
 import com.ramatafu.trafficmonitor.vpn.ConnectionLog
+import com.ramatafu.trafficmonitor.vpn.DomainBlockListStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -224,6 +225,19 @@ class TcpForwarder(
                 if (domain != null) {
                     Log.d(TAG, "SNI для ${session.key}: $domain")
                     ConnectionLog.recordDomain(session.key.serverIp, session.key.serverPort, domain)
+
+                    if (DomainBlockListStore.isBlocked(domain)) {
+                        // Фолбэк-механизм блокировки по домену: DNS уже мог не
+                        // попасться под sinkhole (например, домен резолвился раньше,
+                        // чем его заблокировали) — но сам ClientHello мы всё ещё
+                        // видим, поэтому рвём соединение прямо тут, не пересылая
+                        // ни байта дальше на реальный сервер.
+                        session.clientSeqNext = (session.clientSeqNext + tcp.payload.size) and 0xFFFFFFFFL
+                        Log.i(TAG, "Домен $domain заблокирован — рвём ${session.key}")
+                        sendRst(session)
+                        closeSession(session.key)
+                        return
+                    }
                 }
             }
             try {

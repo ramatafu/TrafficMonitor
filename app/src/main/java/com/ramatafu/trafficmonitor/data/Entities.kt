@@ -14,3 +14,8 @@ data class KnownDomainEntity(
     val port: Int,
     val domain: String
 )
+
+@Entity(tableName = "blocked_domains")
+data class BlockedDomainEntity(
+    @PrimaryKey val domain: String
+)
